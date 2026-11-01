@@ -1,0 +1,49 @@
+name: Sync upstream daily
+
+on:
+  schedule:
+    # 09:17 Asia/Shanghai
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Gzj6688/MoonTVPlus'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream without overwriting local changes
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/mtvpls/MoonTVPlus.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "No upstream updates."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      # GITHUB_TOKEN pushes do not trigger push workflows.
+      - name: Deploy updated main to Cloudflare
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run cloudflare-deploy.yml --ref main
