@@ -1040,6 +1040,14 @@ export class DbManager {
     }
   }
 
+  // 获取管理员配置的代际号（admin_config.updated_at）；存储层不支持时返回 null
+  async getAdminConfigUpdatedAt(): Promise<number | null> {
+    if (typeof (this.storage as any).getAdminConfigUpdatedAt === 'function') {
+      return (this.storage as any).getAdminConfigUpdatedAt();
+    }
+    return null;
+  }
+
   // ---------- 本地设置云同步 ----------
   async getUserLocalSettings(
     userName: string
