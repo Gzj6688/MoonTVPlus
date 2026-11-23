@@ -3356,6 +3356,22 @@ export class PostgresStorage implements IStorage {
     }
   }
 
+  // 只读 updated_at 一列，作为配置代际号供缓存失效校验（轻量探针，不解析整份配置）
+  async getAdminConfigUpdatedAt(): Promise<number | null> {
+    try {
+      const result = await this.db
+        .prepare('SELECT updated_at FROM admin_config WHERE id = 1')
+        .first();
+
+      if (!result) return null;
+      const updatedAt = Number(result.updated_at);
+      return Number.isFinite(updatedAt) ? updatedAt : null;
+    } catch (err) {
+      console.error('PostgresStorage.getAdminConfigUpdatedAt error:', err);
+      return null;
+    }
+  }
+
   // ---------- 本地设置云同步 ----------
 
   async getUserLocalSettings(

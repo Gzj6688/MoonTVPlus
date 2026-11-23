@@ -147,6 +147,9 @@ export interface IStorage {
   // 管理员配置相关
   getAdminConfig(): Promise<AdminConfig | null>;
   setAdminConfig(config: AdminConfig): Promise<void>;
+  // 可选：返回 admin_config 的 updated_at（毫秒时间戳）作为配置代际号，
+  // 供配置缓存失效校验使用；存储层无法提供时可以不实现
+  getAdminConfigUpdatedAt?(): Promise<number | null>;
 
   // 跳过片头片尾配置相关
   getSkipConfig(
