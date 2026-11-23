@@ -154,10 +154,6 @@ export default function PrivateLibraryPage() {
     // 如果 OpenList 未配置但 Emby 已配置，强制使用 Emby
     if (!runtimeConfig.OPENLIST_ENABLED && runtimeConfig.EMBY_ENABLED) {
       setSourceType('emby');
-      // 同时采用 URL 中指定的 Emby 源，避免深链 ?source=emby:<key> 被静默落到第一个源
-      if (parsed.embyKey) {
-        setEmbyKey(parsed.embyKey);
-      }
     } else if (parsed.sourceType) {
       setSourceType(parsed.sourceType);
       if (parsed.embyKey) {
@@ -221,9 +217,6 @@ export default function PrivateLibraryPage() {
     setHasMore(true);
     setError('');
     setSelectedView('all');
-    // 同步清空 Emby 分类：否则新源的分类返回前仍渲染旧源分类，
-    // 点击会把旧源的视图 ID 配上新源的 embyKey 请求列表，必然 404
-    setEmbyViews([]);
     setOpenlistCategory('all');
     setLoading(false);
     setLoadingMore(false);

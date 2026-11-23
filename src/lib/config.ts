@@ -79,62 +79,6 @@ export const API_CONFIG = {
 let cachedConfig: AdminConfig;
 let configInitPromise: Promise<AdminConfig> | null = null;
 
-// ---- 配置缓存代际校验 ----
-// 背景：Cloudflare Workers 是多 isolate 架构，模块级内存不跨 isolate 共享。
-// 若缓存永不失效，某个 isolate 保存配置后，其他 isolate 会一直使用旧代际配置
-// （典型症状：新加的 Emby 源在部分请求里报「未找到 Emby 源」、后台与前台看到的配置不一致）。
-// 策略：命中缓存时定期用 admin_config.updated_at 作为代际号探针比对，不一致则回读数据库；
-// 存储层不支持代际探针时退化为短 TTL；探针或读库失败时一律继续使用现有缓存，
-// 保证读配置这条路不比无校验时更脆弱。
-let cachedConfigGeneration: number | null = null; // 当前缓存对应的 updated_at，未知为 null
-let cachedConfigLoadedAt = 0; // 当前缓存的建立时间（TTL 兜底用）
-let lastConfigProbeAt = 0; // 上次代际探针时间（节流用）
-let configRevalidateFallback: {
-  config: AdminConfig;
-  generation: number | null;
-} | null = null; // 重新加载失败时的回退配置
-const CONFIG_PROBE_INTERVAL_MS = 5000; // 代际探针最小间隔
-const CONFIG_CACHE_TTL_MS = 30000; // 无代际探针时的缓存 TTL
-
-// 探针读取数据库当前的配置代际；失败或存储层不支持时返回 null
-async function probeConfigGeneration(): Promise<number | null> {
-  try {
-    const generation = await db.getAdminConfigUpdatedAt();
-    return typeof generation === 'number' ? generation : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// 判断内存中的配置缓存是否已过期（需要回读数据库）。
-// 探针异常时一律按未过期处理：宁可短时多用一会儿旧缓存，也不能让校验失败影响读配置。
-async function isCachedConfigStale(): Promise<boolean> {
-  const now = Date.now();
-  if (now - lastConfigProbeAt < CONFIG_PROBE_INTERVAL_MS) {
-    return false;
-  }
-  lastConfigProbeAt = now;
-
-  let remoteGeneration: number | null = null;
-  try {
-    remoteGeneration = await db.getAdminConfigUpdatedAt();
-  } catch (e) {
-    return false;
-  }
-
-  if (typeof remoteGeneration !== 'number') {
-    // 存储层不支持代际探针（如 Redis）：退化为 TTL 判断
-    return now - cachedConfigLoadedAt > CONFIG_CACHE_TTL_MS;
-  }
-
-  if (cachedConfigGeneration === null) {
-    // 本地代际未知（例如建立缓存时探针失败）：保守地重载一次以建立代际
-    return true;
-  }
-
-  return remoteGeneration !== cachedConfigGeneration;
-}
-
 // 从配置文件文本里读 special_source_apis（兼容驼峰写法）
 function readSpecialSourceApisFromFile(configFile?: string): string[] {
   if (!configFile) {
@@ -500,21 +444,9 @@ async function getInitConfig(
 }
 
 export async function getConfig(): Promise<AdminConfig> {
-  // 直接使用内存缓存（先做代际校验，避免多 isolate 下读到旧代际配置）
+  // 直接使用内存缓存
   if (cachedConfig) {
-    const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
-    if (storageType === 'localstorage') {
-      return cachedConfig;
-    }
-    if (!(await isCachedConfigStale())) {
-      return cachedConfig;
-    }
-    // 缓存已过期：保留旧配置作为重新加载失败时的回退，随后走初始化流程回读数据库
-    configRevalidateFallback = {
-      config: cachedConfig,
-      generation: cachedConfigGeneration,
-    };
-    cachedConfig = null as any;
+    return cachedConfig;
   }
 
   // 如果正在初始化，等待初始化完成
@@ -524,8 +456,6 @@ export async function getConfig(): Promise<AdminConfig> {
 
   // 创建初始化 Promise
   configInitPromise = (async () => {
-    const revalidateFallback = configRevalidateFallback;
-    configRevalidateFallback = null;
     const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
 
     // localStorage 模式下直接从环境变量初始化
@@ -533,15 +463,9 @@ export async function getConfig(): Promise<AdminConfig> {
       console.log('localStorage 模式：从环境变量初始化配置');
       const adminConfig = await getInitConfig('');
       cachedConfig = configSelfCheck(adminConfig);
-      cachedConfigLoadedAt = Date.now();
       configInitPromise = null;
       return cachedConfig;
     }
-
-    // 先探针记录加载开始时的配置代际，再读配置本体：
-    // 保证记录的代际不新于读到的配置，加载期间发生的保存会在下次探针时被发现
-    const loadedGeneration = await probeConfigGeneration();
-    let generationForCache = loadedGeneration;
 
     // 读 db
     let adminConfig: AdminConfig | null = null;
@@ -556,16 +480,9 @@ export async function getConfig(): Promise<AdminConfig> {
     // db 中无配置，执行一次初始化
     if (!adminConfig) {
       if (dbReadFailed) {
-        if (revalidateFallback) {
-          // 重新校验时读库失败：继续使用旧缓存，避免把可用配置替换成默认配置
-          console.warn('重新加载管理员配置失败，继续使用旧配置缓存');
-          adminConfig = revalidateFallback.config;
-          generationForCache = revalidateFallback.generation;
-        } else {
-          // 数据库读取失败，使用默认配置但不保存，避免覆盖数据库
-          console.warn('数据库读取失败，使用临时默认配置（不会保存到数据库）');
-          adminConfig = await getInitConfig('');
-        }
+        // 数据库读取失败，使用默认配置但不保存，避免覆盖数据库
+        console.warn('数据库读取失败，使用临时默认配置（不会保存到数据库）');
+        adminConfig = await getInitConfig('');
       } else {
         // 数据库中确实没有配置，首次初始化并保存
         console.log('首次初始化配置');
@@ -616,11 +533,6 @@ export async function getConfig(): Promise<AdminConfig> {
         // 不影响主流程，继续执行
       }
     }
-
-    // 记录本次缓存的代际与建立时间，供后续代际校验使用
-    cachedConfigGeneration = generationForCache;
-    cachedConfigLoadedAt = Date.now();
-    lastConfigProbeAt = Date.now();
 
     // 清除初始化 Promise
     configInitPromise = null;
@@ -1360,9 +1272,6 @@ export async function resetConfig() {
   );
   cachedConfig = adminConfig;
   await db.saveAdminConfig(adminConfig);
-  cachedConfigLoadedAt = Date.now();
-  lastConfigProbeAt = Date.now();
-  cachedConfigGeneration = await probeConfigGeneration();
 
   return;
 }
@@ -1448,18 +1357,9 @@ export async function getAvailableApiSites(
 
 export async function setCachedConfig(config: AdminConfig) {
   cachedConfig = config;
-  cachedConfigLoadedAt = Date.now();
-  lastConfigProbeAt = Date.now();
-  // 调用方在此之前刚把配置保存到数据库，探针记录最新代际；
-  // 探针失败则置空，下次读取时保守地重新加载一次
-  cachedConfigGeneration = await probeConfigGeneration();
 }
 
 export async function clearConfigCache() {
   cachedConfig = null as any;
   configInitPromise = null;
-  cachedConfigGeneration = null;
-  cachedConfigLoadedAt = 0;
-  lastConfigProbeAt = 0;
-  configRevalidateFallback = null;
 }
